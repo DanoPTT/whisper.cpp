@@ -1,0 +1,70 @@
+name: win-vulkan
+
+# Windows x64 build with the Vulkan backend (for AMD R9700, no CUDA).
+# Produces a zip with whisper-server.exe, whisper-cli.exe and the ggml DLLs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      vulkan_version:
+        description: "Vulkan SDK version"
+        required: false
+        default: "1.4.357.0"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      VULKAN_VERSION: ${{ inputs.vulkan_version || '1.4.357.0' }}
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          curl.exe -o $env:RUNNER_TEMP/VulkanSDK-Installer.exe -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\${env:VULKAN_VERSION}"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\${env:VULKAN_VERSION}\bin"
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build -A x64 `
+            -DGGML_VULKAN=ON `
+            -DGGML_NATIVE=OFF `
+            -DWHISPER_BUILD_EXAMPLES=ON `
+            -DWHISPER_BUILD_TESTS=OFF `
+            -DWHISPER_SDL2=OFF
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+
+      - name: Package
+        id: pack
+        shell: pwsh
+        run: |
+          $sha = "$(git rev-parse --short=9 HEAD)"
+          $name = "whisper-win-vulkan-$sha"
+          New-Item -ItemType Directory -Force dist\$name | Out-Null
+          Copy-Item build\bin\Release\* dist\$name\ -Recurse
+          Copy-Item samples\jfk.wav dist\$name\
+          Copy-Item models\download-ggml-model.cmd dist\$name\
+          "commit=$(git rev-parse HEAD)" | Set-Content dist\$name\BUILD_INFO.txt
+          "vulkan_sdk=$env:VULKAN_VERSION" | Add-Content dist\$name\BUILD_INFO.txt
+          Get-ChildItem dist\$name | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+          if (-not (Test-Path dist\$name\whisper-server.exe)) { throw "whisper-server.exe missing" }
+          if (-not (Test-Path dist\$name\whisper-cli.exe)) { throw "whisper-cli.exe missing" }
+          "name=$name" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: dist/${{ steps.pack.outputs.name }}
+          retention-days: 30
